@@ -140,7 +140,27 @@ def ensure_agent_runtime_current() -> None:
 
 
 def require_ai_agent_class():
-    """Import ``AIAgent`` after proving the loaded source revision is current."""
+    """Return AIAgent (local) or RemoteAIAgent (remote), selecting at runtime.
+
+    Selection rule:
+      - If ``HERMES_AGENT_SERVER_TOKEN`` env var is set, return
+        ``RemoteAIAgent`` (drop-in proxy to ``agent_remote_server``). The
+        ``AIAgent not available`` import path is unreachable in this
+        mode; instead the failure surface is the remote server endpoint.
+      - Otherwise, fall back to the in-process ``from run_agent import
+        AIAgent``, which is what every webui install has relied on for
+        months.
+
+    The runtime guard (revision pinning) is intentionally bypassed in
+    the remote case — the remote server is a separate process and
+    its source revisions are managed by its own deployment loop.
+    """
+    import os
+    remote_token = os.environ.get("HERMES_AGENT_SERVER_TOKEN", "").strip()
+    if remote_token:
+        from api.agent_remote_client import RemoteAIAgent
+        return RemoteAIAgent
+
     ensure_agent_runtime_current()
     from run_agent import AIAgent  # noqa: PLC0415
 
