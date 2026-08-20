@@ -288,6 +288,57 @@ function _isBacktickFenceClose(line,minLen){
   return !!(m&&m[1].length>=minLen);
 }
 /**
+ * Front-end mirror of the dsh `time-context` plugin. Renders a collapsible
+ * "Context injection · time-context" row above each user message, matching the
+ * block the WebUI backend injects into the model-facing prompt. The backend is
+ * the source of truth for the model; this only makes the same information
+ * visible in the chat UI (dsh shows it as a disclosure row, not hidden).
+ *
+ * @param {object} m - current message object (needs timestamp/_ts)
+ * @param {number|null} prevTs - epoch seconds of the preceding visible message
+ */
+function _timeContextHtmlForMessage(m, prevTs) {
+  const nowSec = (m && (m.timestamp || m._ts)) ? (m.timestamp || m._ts) : (Date.now() / 1000);
+  const zone = (typeof Intl !== 'undefined' && Intl.DateTimeFormat)
+    ? Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+    : 'UTC';
+  // Build an ISO-shaped timestamp with offset + IANA zone, dsh-compatible.
+  let stamp;
+  try {
+    const d = new Date(nowSec * 1000);
+    const off = d.getTimezoneOffset();
+    const sign = off <= 0 ? '+' : '-';
+    const abs = Math.abs(off);
+    const offStr = sign + String(Math.floor(abs / 60)).padStart(2, '0') + ':' + String(abs % 60).padStart(2, '0');
+    const p = (n) => String(n).padStart(2, '0');
+    stamp = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}${offStr}[${zone}]`;
+  } catch (e) {
+    stamp = new Date(nowSec * 1000).toISOString();
+  }
+  // Elapsed since preceding visible message.
+  let elapsed = 'unavailable';
+  if (prevTs && Number.isFinite(prevTs)) {
+    let s = Math.max(0, Math.floor(nowSec - prevTs));
+    const d = Math.floor(s / 86400); s %= 86400;
+    const h = Math.floor(s / 3600); s %= 3600;
+    const mn = Math.floor(s / 60); s %= 60;
+    const parts = [];
+    if (d > 0) parts.push(d + 'd');
+    if (h > 0) parts.push(h + 'h');
+    if (mn > 0) parts.push(mn + 'm');
+    parts.push(s + 's');
+    elapsed = parts.join(' ');
+  }
+  const body =
+    'Supersedes earlier snapshots\n' +
+    'time-context\n' +
+    `Time sampled while preparing turn 1, step 1: ${stamp}\n` +
+    `Browser time zone for this request: ${zone}. Interpret otherwise-unqualified dates and times in this zone.\n` +
+    `Elapsed since the preceding model-visible message: ${elapsed}.`;
+  return `<details class="time-context-row"><summary>Context injection · time-context</summary><pre class="time-context-body">${esc(body)}</pre></details>`;
+}
+
+/**
  * Render fenced code blocks inside user messages.
  * Extracts ```…``` fences, replaces them with placeholders,
  * escapes remaining text as plain HTML, then restores code blocks
@@ -6685,6 +6736,130 @@ function _syncCtxIndicator(usage){
     costText,
     compressText
   });
+}
+
+// ── StatsLine: session statistics bar under the composer (dsh-style) ──
+// Mirrors dsh's StatsLine: turns/steps · LLM/tool duration · tok/s ·
+// cache hit · in/out tokens · cost. Renders only when usage data exists;
+// when the line overflows, hover reveals the full text in a tooltip.
+function _fmtTokensCompact(n){
+  n=Number(n)||0;
+  if(n>=1e6) return (n/1e6).toFixed(1)+'M';
+  if(n>=1e3) return (n/1e3).toFixed(1)+'K';
+  return String(n);
+}
+function _fmtDurationCompact(seconds){
+  seconds=Number(seconds)||0;
+  if(seconds<=0) return '0s';
+  const m=Math.floor(seconds/60), s=Math.round(seconds%60);
+  if(m<=0) return s+'s';
+  return m+'m'+(s>0?s+'s':'');
+}
+function _fmtCostCompact(cost){
+  cost=Number(cost)||0;
+  if(cost<=0) return null;
+  if(cost<0.01) return '$'+cost.toFixed(4);
+  return '$'+cost.toFixed(2);
+}
+function _syncStatsLine(usage){
+  const wrap=$('statslineWrap');
+  if(!wrap) return;
+  if(!usage || typeof usage!=='object'){
+    wrap.setAttribute('hidden','');
+    return;
+  }
+  const parts={};
+  // counts: user turns + message count (fall back to S.session for SSE paths
+  // whose usage payload only carries token data)
+  let userMsgs=Number(usage.user_message_count)||0;
+  let totalMsgs=Number(usage.message_count)||0;
+  if((!userMsgs||!totalMsgs)&&typeof S!=='undefined'&&S&&S.session){
+    if(!userMsgs) userMsgs=Number(S.session.user_message_count)||0;
+    if(!totalMsgs) totalMsgs=Number(S.session.message_count)||0;
+  }
+  if(userMsgs>0||totalMsgs>0){
+    parts.counts=(typeof t==='function')
+      ? t('stats_counts',userMsgs>0?userMsgs:totalMsgs,totalMsgs)
+      : (userMsgs>0?userMsgs:totalMsgs)+' turns · '+totalMsgs+' msgs';
+  }
+  // durations: LLM + tool (from per-turn accumulators on settled assistant nodes)
+  let llmMs=0, toolMs=0, tpsSum=0, tpsCount=0;
+  const msgs=(typeof S!=='undefined'&&S&&S.messages)||[];
+  for(const m of msgs){
+    if(m&&m.role==='assistant'){
+      if(typeof m._turnDuration==='number'&&m._turnDuration>0) llmMs+=m._turnDuration*1000;
+      if(typeof m._turnTps==='number'&&m._turnTps>0){ tpsSum+=m._turnTps; tpsCount++; }
+      const tu=m._turnUsage;
+      if(tu&&typeof tu.estimated_cost==='number'&&tu.estimated_cost>0){
+        // tool calls measured via message metadata when present
+        if(Array.isArray(m.tool_calls)&&m.tool_calls.length>0) toolMs+=500; // coarse fallback
+      }
+    }
+  }
+  // Tool duration: prefer explicit tool-call wall time if available
+  const toolDurationTotal=(usage.tool_duration_seconds||0);
+  if(toolDurationTotal>0) toolMs=toolDurationTotal*1000;
+  const durParts=[];
+  if(llmMs>0) durParts.push((typeof t==='function')?t('stats_llm',_fmtDurationCompact(llmMs/1000)):'LLM '+_fmtDurationCompact(llmMs/1000));
+  if(toolMs>0) durParts.push((typeof t==='function')?t('stats_toolCall',_fmtDurationCompact(toolMs/1000)):'Tool '+_fmtDurationCompact(toolMs/1000));
+  if(durParts.length>0) parts.durations=durParts.join(' · ');
+  // speeds: tps
+  const usageTps=Number(usage.tps)||0;
+  const tps=usageTps>0?usageTps:(tpsCount>0?tpsSum/tpsCount:0);
+  if(tps>0) parts.speeds=(typeof t==='function')?t('stats_speed',Math.round(tps)):Math.round(tps)+' tok/s';
+  // cache hit
+  const cacheHit=usage.cache_hit_percent;
+  if(cacheHit!=null&&!isNaN(cacheHit)) parts.cache=(typeof t==='function')?t('stats_cacheHit',Math.round(cacheHit)):'Cache '+Math.round(cacheHit)+'%';
+  // tokens
+  const inp=Number(usage.input_tokens)||0, out=Number(usage.output_tokens)||0;
+  if(inp>0||out>0) parts.tokens=(typeof t==='function')?t('stats_tokens',_fmtTokensCompact(inp),_fmtTokensCompact(out)):'In '+_fmtTokensCompact(inp)+' · Out '+_fmtTokensCompact(out);
+  // cost
+  const cost=_fmtCostCompact(usage.estimated_cost);
+  if(cost) parts.cost=(typeof t==='function')?t('stats_cost',cost):'Cost '+cost;
+
+  const keys=['counts','durations','speeds','cache','tokens','cost'];
+  const any=keys.some(k=>parts[k]);
+  if(!any){
+    wrap.setAttribute('hidden','');
+    return;
+  }
+  wrap.removeAttribute('hidden');
+  const idMap={counts:'statslineCounts',durations:'statslineDurations',speeds:'statslineSpeeds',cache:'statslineCache',tokens:'statslineTokens',cost:'statslineCost'};
+  for(const k of keys){
+    const el=$('statsline'+k.charAt(0).toUpperCase()+k.slice(1));
+    if(!el) continue;
+    el.textContent=parts[k]||'';
+  }
+  // separators: hide when a group is empty
+  const seps=wrap.querySelectorAll('.statsline-sep');
+  const visibleKeys=keys.filter(k=>parts[k]);
+  for(let i=0;i<seps.length;i++) seps[i].style.display=(i<visibleKeys.length-1)?'':'none';
+  // overflow tooltip
+  const line=$('statsline');
+  const tip=$('statslineTooltip');
+  if(line&&tip){
+    const full=visibleKeys.map(k=>parts[k]).join(' · ');
+    tip.textContent=full;
+    const overflowed=line.scrollWidth>line.clientWidth;
+    if(overflowed){
+      line.addEventListener('mouseenter',function showTip(){
+        tip.style.display='block';
+        tip.setAttribute('aria-hidden','false');
+      },{once:false});
+      line.addEventListener('mouseleave',function hideTip(){
+        tip.style.display='none';
+        tip.setAttribute('aria-hidden','true');
+      });
+      // re-check on resize
+      if(typeof ResizeObserver!=='undefined'&&!line._statsRO){
+        line._statsRO=new ResizeObserver(function(){ _syncStatsLine(usage); });
+        line._statsRO.observe(line);
+      }
+    }else{
+      tip.style.display='none';
+      tip.setAttribute('aria-hidden','true');
+    }
+  }
 }
 
 // ── Touch support: toggle context tooltip on tap (#524) ──
@@ -15876,7 +16051,10 @@ function renderMessages(options){
       let row=_msgNodeRecycleEnabled?_recycleStash.get(rawIdx):null;
       if(row&&(!row.classList.contains('msg-row')||row.classList.contains('assistant-turn'))) row=null;
       const newRawText=String(displayContent).trim();
-      const nextRowHtml=`${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
+      const _prevVisMsg = (rawIdx > 0 && renderVisWithIdx[rawIdx - 1] && renderVisWithIdx[rawIdx - 1].m) ? renderVisWithIdx[rawIdx - 1].m : null;
+      const _prevTs = _prevVisMsg ? (_prevVisMsg.timestamp || _prevVisMsg._ts || null) : null;
+      const _timeCtxHtml = _timeContextHtmlForMessage(m, _prevTs);
+      const nextRowHtml=`${_timeCtxHtml}${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
       if(row){
         row.className='msg-row';
         row.id=_userMessageDomId(rawIdx);

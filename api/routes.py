@@ -13843,6 +13843,14 @@ def _validate_session_toolsets_shape(toolsets):
 
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
+    # Capture the client's browser timezone (set by the WebUI frontend) so the
+    # time-context injection can mirror dsh's browser-zone derivation.
+    try:
+        from api.time_context import set_client_timezone
+
+        set_client_timezone(handler.headers.get("X-Client-Timezone"))
+    except Exception:
+        pass
     diag = RequestDiagnostics.maybe_start("POST", parsed.path, logger=logger, print_fn=getattr(handler, '_safe_webui_print', None))
     if parsed.path == "/api/csp-report":
         if diag:
@@ -22367,8 +22375,12 @@ def _handle_chat_sync(handler, body):
                 _compact_session_image_parts_for_persistence,
                 _context_messages_for_new_turn,
                 _workspace_context_prefix,
+                _build_time_context_block,
+                _last_message_ts_ms,
             )
-            workspace_ctx = _workspace_context_prefix(str(s.workspace))
+            workspace_ctx = _workspace_context_prefix(str(s.workspace)) + _build_time_context_block(
+                previous_ms=_last_message_ts_ms(s)
+            )
             workspace_system_msg = (
                 f"Active workspace at session start: {s.workspace}\n"
                 "Every user message is prefixed with [Workspace::v1: /absolute/path] indicating the "

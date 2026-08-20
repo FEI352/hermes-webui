@@ -489,6 +489,25 @@ def get_active_hermes_home() -> Path:
 # which is also under the lock — so child processes always see a consistent
 # (own-profile) HERMES_HOME, never a half-swapped state.
 _cron_env_lock = threading.Lock()
+# Bounded wait for the cron env lock (#cron-env-lock-timeout).  An agent-mode
+# cron run (LLM job) legitimately holds the lock for many minutes; without a
+# deadline every /api/crons* request queues behind it and the browser's 30s
+# fetch timeout surfaces as a misleading "Request timed out" toast.  With a
+# deadline the API returns 503 (retryable) instead of hanging.
+_CRON_ENV_LOCK_TIMEOUT_SECONDS = 10.0
+
+
+class CronEnvLockTimeout(RuntimeError):
+    """Raised when the cron HERMES_HOME lock cannot be acquired within the
+    bounded wait.  Callers map this to HTTP 503 so the client can retry."""
+
+
+def _acquire_cron_env_lock(timeout: float = _CRON_ENV_LOCK_TIMEOUT_SECONDS) -> None:
+    if not _cron_env_lock.acquire(timeout=timeout):
+        raise CronEnvLockTimeout(
+            "cron subsystem is busy (a long-running job holds the env lock); "
+            "retry shortly"
+        )
 
 
 def _cron_profile_context_depth() -> int:
@@ -598,7 +617,7 @@ class cron_profile_context_for_home:
         self._home = Path(home)
 
     def __enter__(self):
-        _cron_env_lock.acquire()
+        _acquire_cron_env_lock()
         _push_cron_profile_context_depth()
         try:
             self._prev_env = os.environ.get('HERMES_HOME')
@@ -677,7 +696,7 @@ class cron_profile_context:
     """
 
     def __enter__(self):
-        _cron_env_lock.acquire()
+        _acquire_cron_env_lock()
         _push_cron_profile_context_depth()
         try:
             self._prev_env = os.environ.get('HERMES_HOME')

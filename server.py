@@ -107,7 +107,7 @@ from api.helpers import (
     _build_csp_report_only_policy,
     _CLIENT_DISCONNECT_ERRORS,
 )
-from api.profiles import set_request_profile, clear_request_profile
+from api.profiles import CronEnvLockTimeout, set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
@@ -385,6 +385,16 @@ class Handler(BaseHTTPRequestHandler):
         except _CLIENT_DISCONNECT_ERRORS:
             # Expected disconnect path; do not convert it into a misleading server 500.
             return
+        except CronEnvLockTimeout as e:
+            # A long-running cron job (LLM agent mode) holds the HERMES_HOME env
+            # lock; return retryable 503 instead of queueing past the client's
+            # fetch timeout (which surfaces as a misleading "Request timed out").
+            try:
+                j(self, {'error': str(e)}, status=503)
+            except _CLIENT_DISCONNECT_ERRORS:
+                pass
+            except Exception:
+                self._safe_webui_print(traceback.format_exc())
         except Exception:
             self._safe_webui_print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc())
             try:
@@ -413,6 +423,13 @@ class Handler(BaseHTTPRequestHandler):
         except _CLIENT_DISCONNECT_ERRORS:
             # Expected disconnect path; do not convert it into a misleading server 500.
             return
+        except CronEnvLockTimeout as e:
+            try:
+                j(self, {'error': str(e)}, status=503)
+            except _CLIENT_DISCONNECT_ERRORS:
+                pass
+            except Exception:
+                self._safe_webui_print(traceback.format_exc())
         except Exception:
             self._safe_webui_print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc())
             try:

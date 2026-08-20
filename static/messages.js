@@ -5845,7 +5845,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               ? _mergeUsageForCtxIndicator(d.usage,_doneUsageFallback)
               : {..._doneUsageFallback,...d.usage};
             _syncCtxIndicator(S.lastUsage);
-            // #503 — compute per-turn cost delta and attach to last assistant message
+            if(typeof _syncStatsLine==='function') _syncStatsLine(S.lastUsage);
             if(lastAsst){
               const prevIn=_prevIn;
               const prevOut=_prevOut;
@@ -6096,6 +6096,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           ? _mergeUsageForCtxIndicator(d.usage,S.lastUsage||{})
           : {...(S.lastUsage||{}),...d.usage};
         _syncCtxIndicator(S.lastUsage);
+        if(typeof _syncStatsLine==='function') _syncStatsLine(S.lastUsage);
       }
       if(typeof appendLiveCompressionCard==='function'){
         appendLiveCompressionCard({
@@ -6122,6 +6123,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               ? _mergeUsageForCtxIndicator(d.usage,S.lastUsage||{})
               : {...(S.lastUsage||{}),...d.usage};
             _syncCtxIndicator(S.lastUsage);
+            if(typeof _syncStatsLine==='function') _syncStatsLine(S.lastUsage);
           }
         }
         if(d.estimated===true||d.tps_available!==true||typeof d.tps!=='number'||d.tps<=0){

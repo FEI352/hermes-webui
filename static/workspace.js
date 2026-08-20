@@ -40,7 +40,7 @@ async function api(path,opts={}){
         fetchOpts.signal=controller.signal;
       }
       const requestPromise=(async()=>{
-        const res=await fetch(url.href,{credentials:'include',headers:{'Content-Type':'application/json'},...fetchOpts});
+        const res=await fetch(url.href,{credentials:'include',headers:{'Content-Type':'application/json','X-Client-Timezone':(Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC')},...fetchOpts});
         if(!res.ok){
           // 401 means the auth session expired. Redirect to login so the user can
           // re-authenticate. This is especially important for iOS PWA (standalone mode)

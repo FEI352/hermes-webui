@@ -2189,6 +2189,17 @@ function _applySessionContextMetadataUpdate(data){
       post_compression_context_tokens_estimate:S.session.post_compression_context_tokens_estimate,
       threshold_tokens:S.session.threshold_tokens||0,
     });
+    if(typeof _syncStatsLine==='function') _syncStatsLine({
+      input_tokens:_pick(u.input_tokens,S.session.input_tokens),
+      output_tokens:_pick(u.output_tokens,S.session.output_tokens),
+      estimated_cost:_pick(u.estimated_cost,S.session.estimated_cost),
+      cache_read_tokens:_pick(u.cache_read_tokens,S.session.cache_read_tokens),
+      cache_write_tokens:_pick(u.cache_write_tokens,S.session.cache_write_tokens),
+      cache_hit_percent:_pick(u.cache_hit_percent,S.session.cache_hit_percent,null),
+      message_count:S.session.message_count,
+      user_message_count:S.session.user_message_count,
+      tps:_pick(u.tps,S.session.tps,0),
+    });
   }
 }
 

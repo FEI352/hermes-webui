@@ -2341,6 +2341,17 @@ async function loadSession(sid){
       post_compression_context_tokens_estimate:_s.post_compression_context_tokens_estimate||null,
       threshold_tokens:  _pick(_s.threshold_tokens,  u.threshold_tokens),
     });
+    if(typeof _syncStatsLine==='function') _syncStatsLine({
+      input_tokens:      _pick(u.input_tokens,      _s.input_tokens),
+      output_tokens:     _pick(u.output_tokens,     _s.output_tokens),
+      estimated_cost:    _pick(u.estimated_cost,    _s.estimated_cost),
+      cache_read_tokens: _pick(u.cache_read_tokens, _s.cache_read_tokens),
+      cache_write_tokens:_pick(u.cache_write_tokens,_s.cache_write_tokens),
+      cache_hit_percent: _pick(u.cache_hit_percent, _s.cache_hit_percent, null),
+      message_count:     _pick(_s.message_count,     u.message_count),
+      user_message_count:_pick(_s.user_message_count,u.user_message_count),
+      tps:               _pick(u.tps,                _s.tps, 0),
+    });
   }
   if(typeof _renderPendingPromptsForActiveSession==='function') _renderPendingPromptsForActiveSession();
 

@@ -2863,6 +2863,37 @@ def _workspace_context_prefix(path: str) -> str:
     return f"[Workspace::v1: {_escape_workspace_prefix_path(path)}]\n"
 
 
+def _last_message_ts_ms(session) -> float | None:
+    """Return the epoch-ms timestamp of the most recent stored message, if any."""
+    try:
+        msgs = getattr(session, "messages", None) or []
+        for msg in reversed(msgs):
+            if not isinstance(msg, dict):
+                continue
+            ts = msg.get("timestamp") or msg.get("_ts")
+            if ts:
+                # Hermes stores second-precision ints; convert to ms.
+                return float(ts) * (1000.0 if ts < 1e12 else 1.0)
+    except Exception:
+        return None
+    return None
+
+
+def _build_time_context_block(*, previous_ms: float | None = None) -> str:
+    """Inject a dsh-style per-turn time-context block after the workspace tag.
+
+    Reuses the rendering logic ported from @deepseek-ai/dsh-time-context. The
+    client timezone is read from the request-scoped ContextVar populated at the
+    HTTP boundary (handle_post); it falls back to the server zone when absent.
+    """
+    try:
+        from api.time_context import build_time_context_block
+
+        return build_time_context_block(turn=1, step=1, previous_ms=previous_ms)
+    except Exception:
+        return ""
+
+
 def _strip_workspace_prefix(text: str, *, include_legacy: bool = False) -> str:
     """Remove WebUI-injected workspace tags without eating user-typed text."""
     value = str(text or '')
@@ -8787,7 +8818,9 @@ def _run_agent_streaming(
 
             # Prepend workspace context so the agent always knows which directory
             # to use for file operations, regardless of session age or AGENTS.md defaults.
-            workspace_ctx = _workspace_context_prefix(str(s.workspace))
+            workspace_ctx = _workspace_context_prefix(str(s.workspace)) + _build_time_context_block(
+                previous_ms=_last_message_ts_ms(s)
+            )
             workspace_system_msg = (
                 f"Active workspace at session start: {s.workspace}\n"
                 "Every user message is prefixed with [Workspace::v1: /absolute/path] indicating the "

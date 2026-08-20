@@ -3864,6 +3864,14 @@ def resolve_model_reasoning_efforts(
     agree: 'max' is offered ONLY for models whose native ladder genuinely includes
     it, and is stripped everywhere it would be rejected/mishandled.
     """
+    # Refresh the in-memory cfg cache so the provider reasoning_efforts
+    # allowlist just written to config.yaml is visible without a WebUI
+    # restart. get_reasoning_status() reads config from disk directly, but
+    # _resolve_model_reasoning_efforts_impl() reads the module-level `cfg`
+    # cache — without this refresh a newly-added allowlist is invisible
+    # until the next full reload, so the UI keeps showing stale (heuristic)
+    # options that don't match the model's real capabilities.
+    reload_config_if_stale()
     raw = _resolve_model_reasoning_efforts_impl(model_id, provider_id, base_url)
     if not raw:
         return raw
@@ -3934,10 +3942,18 @@ def _resolve_model_reasoning_efforts_impl(
         elif provider:
             _prov_entry = (cfg.get("providers") or {}).get(provider, {})
             if isinstance(_prov_entry, dict):
-                _re_list = _prov_entry.get("reasoning_efforts")
+                # 0a. Per-model override: providers.<name>.models.<model>.reasoning_efforts
+                # wins over the provider-level list when present. Hy3 only accepts
+                # (low, high, no_think) — different vocabulary than the standard
+                # ladder, so it must be set at the model level, not the provider.
+                _model_entry = (_prov_entry.get("models") or {}).get(hinted_model)
+                if isinstance(_model_entry, dict) and _model_entry.get("reasoning_efforts"):
+                    _re_list = _model_entry.get("reasoning_efforts")
+                else:
+                    _re_list = _prov_entry.get("reasoning_efforts")
         if isinstance(_re_list, list) and _re_list:
             _filtered = [str(x).strip().lower() for x in _re_list
-                         if str(x).strip().lower() in {*VALID_REASONING_EFFORTS, "none"}]
+                         if str(x).strip().lower() in {*VALID_REASONING_EFFORTS, "none", "no_think"}]
             _filtered = list(dict.fromkeys(_filtered))
             if _filtered:
                 return _filtered

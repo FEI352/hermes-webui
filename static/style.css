@@ -2325,6 +2325,12 @@
   .provider-error-details{margin:12px 0 0;border:1px solid var(--border);border-radius:10px;background:var(--surface);overflow:hidden;}
   .provider-error-details>summary{cursor:pointer;color:var(--muted);font-size:12px;font-weight:600;padding:8px 12px;}
   .provider-error-details>pre{margin:0;border:0;border-top:1px solid var(--border);border-radius:0;max-height:220px;}
+  .time-context-row{margin:0 0 6px;border:1px solid var(--border);border-radius:10px;background:var(--surface);overflow:hidden;}
+  .time-context-row>summary{cursor:pointer;color:var(--muted);font-size:12px;font-weight:600;padding:6px 12px;list-style:none;outline:none;user-select:none;}
+  .time-context-row>summary::-webkit-details-marker{display:none;}
+  .time-context-row>summary::before{content:"▸ ";}
+  .time-context-row[open]>summary::before{content:"▾ ";}
+  .time-context-body{margin:0;border:0;border-top:1px solid var(--border);border-radius:0;padding:10px 12px;font-family:var(--mono,ui-monospace,SFMono-Regular,Menlo,Consolas,monospace);font-size:12px;line-height:1.5;white-space:pre-wrap;color:var(--fg);}
   .process-wakeup-row{padding:6px 0;}
   .process-wakeup-notice{margin:8px 0 8px var(--msg-rail);max-width:min(var(--msg-max),760px);padding:8px 10px;border:1px solid var(--border);border-left:2px solid var(--accent-bg-strong);border-radius:9px;background:var(--surface-subtle,var(--hover-bg));color:var(--muted);}
   .process-wakeup-label{display:flex;align-items:center;gap:6px;margin-bottom:5px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--accent-text);}
@@ -2778,6 +2784,17 @@
   .upload-bar-wrap{display:none;height:3px;background:var(--hover-bg);border-radius:0 0 16px 16px;overflow:hidden;}
   .upload-bar-wrap.active{display:block;}
   .upload-bar{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent-hover));width:0%;transition:width .3s ease;}
+  /* StatsLine: session statistics bar under the composer (dsh-style) */
+  .statsline-wrap{position:relative;padding:0 14px 6px;}
+  .statsline{display:flex;align-items:center;gap:8px;overflow:hidden;white-space:nowrap;font-size:11px;line-height:1.4;color:var(--muted);font-variant-numeric:tabular-nums;cursor:default;}
+  .statsline-item{flex-shrink:0;opacity:.92;}
+  .statsline-item:empty{display:none;}
+  .statsline-sep{flex-shrink:0;opacity:.5;color:var(--muted);}
+  .statsline-tooltip{display:none;position:absolute;bottom:calc(100% + 6px);left:14px;right:14px;z-index:120;background:var(--popup-bg,#1e1e1e);border:1px solid var(--border2);border-radius:10px;padding:8px 12px;font-size:11px;line-height:1.5;color:var(--text);box-shadow:0 8px 24px rgba(0,0,0,.35);white-space:normal;word-break:break-all;}
+  @media (max-width:640px){
+    .statsline{font-size:10px;gap:6px;}
+    .statsline-wrap{padding:0 10px 4px;}
+  }
   /* container-type/name lets descendants run @container queries against the
      panel's width so the header can collapse less-essential elements as the
      user resizes the panel narrower. */
