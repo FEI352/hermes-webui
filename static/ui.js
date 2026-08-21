@@ -5073,7 +5073,7 @@ function _fitComposerFooter(){
   const left=footer.querySelector('.composer-left');
   if(!left) return;
   if(!left.clientWidth) return;
-  const overflows=function(){return left.scrollWidth>left.clientWidth+1;};
+  const overflows=function(){return left.scrollWidth>left.clientWidth+12;};
   footer.classList.remove('cf-icons','cf-burger');
   if(!overflows()) return;
   footer.classList.add('cf-icons');
