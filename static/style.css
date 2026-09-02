@@ -2557,7 +2557,7 @@
      tuned separately for dark vs light themes (see --logo-glow / .hm-g* below). */
   .empty-logo{position:relative;display:flex;align-items:center;justify-content:center;margin-bottom:10px;background:none;border:none;border-radius:0;box-shadow:none;}
   .empty-logo::before{content:"";position:absolute;left:50%;top:50%;width:190px;height:190px;transform:translate(-50%,-50%);border-radius:50%;background:var(--logo-glow);z-index:0;pointer-events:none;}
-  .empty-logo svg{position:relative;z-index:1;width:88px;height:88px;display:block;}
+  .empty-logo svg, .empty-logo img{position:relative;z-index:1;width:88px;height:88px;display:block;border-radius:20px;}
   /* Light themes (default :root): deeper, richer gradient holds contrast on
      a pale background; cooler, restrained bloom. */
   :root .empty-logo .hm-g0{stop-color:#0AA6CC;}
@@ -2568,7 +2568,7 @@
   :root.dark .empty-logo .hm-g1{stop-color:#3889FD;}
   :root.dark{--logo-glow:radial-gradient(circle,rgba(8,235,241,0.20) 0%,rgba(56,137,253,0.15) 38%,transparent 72%);}
   @media (prefers-reduced-motion: no-preference){
-    .empty-logo svg{animation:emptyLogoRise .5s ease-out both;}
+    .empty-logo svg, .empty-logo img{animation:emptyLogoRise .5s ease-out both;}
     @keyframes emptyLogoRise{from{opacity:0;transform:translateY(6px) scale(.96);}to{opacity:1;transform:none;}}
   }
   .empty-state h2{font-size:20px;color:var(--text);font-weight:700;letter-spacing:-.02em;}
