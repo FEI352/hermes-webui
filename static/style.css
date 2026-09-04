@@ -3035,8 +3035,8 @@
   .composer-footer.cf-icons #composerWorkspaceLabel{display:none;}
   .composer-footer.cf-icons .composer-workspace-chip{padding-left:8px;padding-right:8px;gap:2px;}
   .composer-footer.cf-icons .composer-model-label,
-  .composer-footer.cf-icons #composerModelLabel{display:none;}
-  .composer-footer.cf-icons .composer-model-chip{max-width:none;padding-left:10px;padding-right:8px;gap:4px;}
+  .composer-footer.cf-icons #composerModelLabel{display:inline-block;max-width:160px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .composer-footer.cf-icons .composer-model-chip{max-width:200px;padding-left:8px;padding-right:8px;gap:4px;}
   .composer-footer.cf-icons #btnSavedPrompts,
   .composer-footer.cf-icons .saved-prompts-popup{display:none!important;}
   .composer-footer.cf-icons .composer-divider{display:none;}
