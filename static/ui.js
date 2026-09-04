@@ -5197,7 +5197,7 @@ function _formatReasoningEffortLabel(effort){
   if(effort==='low') return 'Low';
   if(effort==='medium') return 'Medium';
   if(effort==='high') return 'High';
-  if(effort==='xhigh') return 'XHigh';
+  if(effort==='xhigh') return 'xhigh';
   if(effort==='max') return 'Max';
   return effort.charAt(0).toUpperCase()+effort.slice(1);
 }
