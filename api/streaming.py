@@ -38,6 +38,7 @@ from api.config import (
     _set_thread_env, _clear_thread_env,
     register_active_run, update_active_run, unregister_active_run,
     unregister_stream_owner,
+    peek_stream,
     stream_owner_session_id,
     session_writeback_owner,
     clear_session_writeback_owner_if_owned,
@@ -3874,6 +3875,71 @@ def _strip_workspace_prefix(text: str, *, include_legacy: bool = False) -> str:
     return stripped.strip()
 
 
+_TITLE_ATTACHMENT_SUFFIX_RE = re.compile(
+    r'(?:\n\n|\r\n\r\n)\[Attached files(?: for this steer)?: [^\]]+\]\s*$'
+)
+
+
+def _strip_title_attachment_suffix(text) -> str:
+    """Remove one exact WebUI-generated terminal attachment suffix."""
+    return _TITLE_ATTACHMENT_SUFFIX_RE.sub('', str(text or ''))
+
+
+def _strip_title_input_metadata(text) -> str:
+    """Remove only internal title metadata from one selected text value."""
+    value = _strip_title_attachment_suffix(text)
+    return _strip_workspace_prefix(value).strip()
+
+
+def _title_structured_text_parts(
+    content, allowed_types, *, normalize_types: bool = False
+) -> list[str]:
+    """Sanitize accepted structured title parts without mutating the content."""
+    parts = []
+    workspace_prefix_stripped = False
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        part_type = str(part.get('type') or '').lower() if normalize_types else part.get('type')
+        if part_type not in allowed_types:
+            continue
+        text = (
+            str(part.get('text') or '')
+            if not normalize_types
+            else _message_content_part_text(part)
+        )
+        if text.strip() and not workspace_prefix_stripped:
+            text = _strip_title_input_metadata(text)
+            workspace_prefix_stripped = bool(text)
+        parts.append(text)
+    return parts
+
+
+def _title_input_text(content) -> str:
+    """Extract raw title text using the same content rules as title_from."""
+    if content is None:
+        return ''
+    if isinstance(content, list):
+        return ' '.join(
+            _title_structured_text_parts(content, ('text',), normalize_types=False)
+        ).strip()
+    return _strip_title_input_metadata(str(content))
+
+
+_TITLE_MIXED_PART_TYPES = ('', 'text', 'input_text', 'output_text')
+
+
+def _title_exchange_input_text(content) -> str:
+    """Extract sanitized first/latest-exchange title input text."""
+    if isinstance(content, list):
+        return '\n'.join(
+            _title_structured_text_parts(
+                content, _TITLE_MIXED_PART_TYPES, normalize_types=True
+            )
+        ).strip()
+    return _strip_title_input_metadata(str(content or '').strip())
+
+
 def _looks_like_current_user_turn(msg, msg_text) -> bool:
     """Match the current human turn even if an internal workspace tag leaked mid-text.
 
@@ -3908,7 +3974,7 @@ def _first_exchange_snippets(messages):
             continue
         role = m.get('role')
         if role == 'user':
-            candidate = _message_text(m.get('content'))
+            candidate = _strip_thinking_markup(_title_exchange_input_text(m.get('content')))
             if not user_text and candidate:
                 user_text = candidate
                 continue
@@ -3949,9 +4015,13 @@ def _latest_exchange_snippets(messages):
                 continue
             if candidate:
                 asst_text = candidate
-        elif role == 'user' and not user_text:
-            candidate = _message_text(m.get('content'))
-            if candidate:
+        elif role == 'user':
+            candidate = _strip_thinking_markup(_title_exchange_input_text(m.get('content')))
+            if not candidate:
+                user_text = ''
+                asst_text = ''
+                break
+            if not user_text:
                 user_text = candidate
         if user_text and asst_text:
             break
@@ -3984,14 +4054,51 @@ def _get_title_refresh_interval() -> int:
 
 def _is_provisional_title(current_title: str, messages) -> bool:
     """Heuristic: title equals first-message substring placeholder."""
-    derived = title_from(messages, '') or ''
-    if not derived:
+    first_user_text = ''
+    for message in messages or []:
+        if not isinstance(message, dict) or message.get('role') != 'user':
+            continue
+        first_user_text = _title_input_text(message.get('content'))
+        if first_user_text:
+            break
+    if not first_user_text:
         return False
+    sanitized_derived = title_from([{'role': 'user', 'content': first_user_text}], '') or ''
+    raw_derived = title_from(messages or [], '') or ''
+    if not sanitized_derived:
+        return False
+
+    def _normalize_candidate(value):
+        return re.sub(r'\s+', ' ', str(value or '')[:64]).strip()
+
     current = re.sub(r'\s+', ' ', str(current_title or '')).strip()
-    candidate = re.sub(r'\s+', ' ', str(derived[:64] or '')).strip()
-    if not current or not candidate:
+    candidates = (
+        _normalize_candidate(sanitized_derived),
+        _normalize_candidate(raw_derived),
+    )
+    if not current:
         return False
-    return current == candidate
+    return any(candidate and current == candidate for candidate in candidates)
+
+
+def _background_title_generation_inputs(session):
+    """Return sanitized first-exchange inputs when background title generation is eligible."""
+    messages = getattr(session, 'messages', None) or []
+    title = getattr(session, 'title', '')
+    invalid_existing_title = _looks_invalid_generated_title(title)
+    eligible_title = (
+        title == 'Untitled'
+        or title == 'New Chat'
+        or not title
+        or _is_provisional_title(title, messages)
+        or invalid_existing_title
+    )
+    if not eligible_title or (
+        getattr(session, 'llm_title_generated', False) and not invalid_existing_title
+    ):
+        return None
+    user_text, assistant_text = _first_exchange_snippets(messages)
+    return (user_text, assistant_text) if user_text and assistant_text else None
 
 
 def _detect_title_language(text: str) -> str:
@@ -4591,7 +4698,7 @@ def _generate_llm_session_title_for_agent(agent, user_text: str, assistant_text:
     return None, 'llm_invalid', str(raw)[:120]
 
 
-def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, agent=None, *, use_agent_model: bool = False) -> tuple[Optional[str], str, str]:
+def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, agent=None, *, use_agent_model: bool = False, conversation_id: str = '') -> tuple[Optional[str], str, str]:
     """Generate a title via dedicated auxiliary LLM route, then sanitize/validate result.
 
     When use_agent_model is False (default), the auxiliary client resolves
@@ -4599,6 +4706,11 @@ def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, age
     prevents the session's chat model (e.g. a Chinese model) from overriding
     the dedicated title model.  When True, the agent's attrs are passed through
     (legacy fallback behaviour).
+
+    conversation_id republishes the webui session id as the Agent's ambient
+    conversation context for the duration of the aux call, so OpenCode relay
+    targets receive the same ``x-opencode-session`` sticky key as the session's
+    main turns (#7470). The context is reset in all exit paths.
     """
     if use_agent_model and agent:
         provider = getattr(agent, 'provider', '')
@@ -4608,13 +4720,30 @@ def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, age
         provider = ''
         model = ''
         base_url = ''
-    raw, status = generate_title_raw_via_aux(
-        user_text,
-        assistant_text,
-        provider=provider,
-        model=model,
-        base_url=base_url,
-    )
+    ctx_token = None
+    if conversation_id:
+        try:
+            from agent.portal_tags import set_conversation_context
+            ctx_token = set_conversation_context(str(conversation_id))
+        except Exception:
+            # Older/absent agent runtime: proceed without conversation context
+            # (previous behaviour) rather than failing title generation.
+            ctx_token = None
+    try:
+        raw, status = generate_title_raw_via_aux(
+            user_text,
+            assistant_text,
+            provider=provider,
+            model=model,
+            base_url=base_url,
+        )
+    finally:
+        if ctx_token is not None:
+            try:
+                from agent.portal_tags import reset_conversation_context
+                reset_conversation_context(ctx_token)
+            except Exception:
+                pass
     if not raw:
         return None, status, ''
     title = _sanitize_generated_title(raw)
@@ -4764,9 +4893,9 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
             if agent and not aux_title_configured:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
                 if not next_title and llm_status in ('llm_error', 'llm_invalid'):
-                    next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True)
+                    next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True, conversation_id=session_id)
             else:
-                next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text)
+                next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, conversation_id=session_id)
                 if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
             source = llm_status
@@ -4862,9 +4991,9 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
             if agent and not aux_title_configured:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
                 if not next_title and llm_status in ('llm_error', 'llm_invalid'):
-                    next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True)
+                    next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True, conversation_id=session_id)
             else:
-                next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text)
+                next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, conversation_id=session_id)
                 if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
         if not next_title:
@@ -4927,7 +5056,7 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
     with profiles_api.profile_env_for_background_worker(session, "manual title regeneration", logger_override=logger):
         if not _aux_title_generation_enabled():
             return None, 'title_generation_disabled', ''
-        next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent)
+        next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, conversation_id=getattr(session, 'session_id', '') or '')
     if next_title:
         return next_title, llm_status, raw_preview
     fallback_title = _fallback_title_from_exchange(user_text, assistant_text)
@@ -8734,7 +8863,7 @@ def _run_agent_streaming(
     """
     _turn_route_model = model
     _turn_route_provider = model_provider
-    q = STREAMS.get(stream_id)
+    q = peek_stream(stream_id)
     if q is None:
         # The stream was cancelled before the worker started; the route layer
         # already registered the stream owner, so release it here to avoid
@@ -11579,17 +11708,7 @@ def _run_agent_streaming(
                 # Only auto-generate title when still default; preserves user renames
                 if s.title == 'Untitled' or s.title == 'New Chat' or not s.title:
                     s.title = title_from(s.messages, s.title)
-                _looks_default = (s.title == 'Untitled' or s.title == 'New Chat' or not s.title)
-                _looks_provisional = _is_provisional_title(s.title, s.messages)
-                _invalid_existing_title = _looks_invalid_generated_title(s.title)
-                _should_bg_title = (
-                    (_looks_default or _looks_provisional or _invalid_existing_title)
-                    and (not getattr(s, 'llm_title_generated', False) or _invalid_existing_title)
-                )
-                _u0 = ''
-                _a0 = ''
-                if _should_bg_title:
-                    _u0, _a0 = _first_exchange_snippets(s.messages)
+                _bg_title_inputs = _background_title_generation_inputs(s)
                 # Read token/cost usage from the agent object (if available).
                 # Per-turn overwrite (#1857): replace cumulative session totals with the
                 # agent's most recent values, which already represent the current turn's
@@ -12351,10 +12470,10 @@ def _run_agent_streaming(
                 # misbehaving log handler here would otherwise skip the
                 # background-title thread spawn below. (#4923 gate hardening)
                 pass
-            if _should_bg_title and _u0 and _a0:
+            if _bg_title_inputs:
                 threading.Thread(
                     target=_run_background_title_update,
-                    args=(s.session_id, _u0, _a0, str(s.title or '').strip(), put, agent),
+                    args=(s.session_id, *_bg_title_inputs, str(s.title or '').strip(), put, agent),
                     daemon=True,
                 ).start()
             else:

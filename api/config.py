@@ -5021,6 +5021,31 @@ def _coerce_optional_positive_int(value, field: str):
     return number
 
 
+def _provider_native_auxiliary_model(provider: str, model: str) -> str:
+    """Return the provider-native model stored by an auxiliary slot.
+
+    ``@provider:model`` is a WebUI picker routing token. Auxiliary slots already
+    store the selected provider separately, so only an exact matching prefix is
+    safe to remove. Reject other qualified forms instead of persisting an
+    ambiguous upstream model name.
+    """
+    provider_id = str(provider or "").strip() or "auto"
+    model_id = str(model or "").strip()
+    if not model_id.startswith("@") or ":" not in model_id:
+        return model_id
+
+    matching_prefix = f"@{provider_id}:"
+    if provider_id != "auto" and model_id.startswith(matching_prefix):
+        native_model = model_id[len(matching_prefix) :]
+        if native_model:
+            return native_model
+
+    raise ValueError(
+        "provider-qualified auxiliary model must match the selected provider "
+        "and include a model name"
+    )
+
+
 def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | None = None) -> dict:
     """Persist an auxiliary model assignment in config.yaml.
 
@@ -5029,6 +5054,8 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
     Sensitive api_key values are write-only: get_auxiliary_models() only reports
     whether one is set.
     """
+    provider = str(provider or "").strip() or "auto"
+    model = str(model or "").strip()
     config_path = _get_config_path()
     with _cfg_lock:
         config_data = _load_yaml_config_file(config_path)
@@ -5054,11 +5081,12 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
             aux_cfg = config_data.get("auxiliary", {})
             if not isinstance(aux_cfg, dict):
                 aux_cfg = {}
+            model = _provider_native_auxiliary_model(provider, model)
             slot_cfg = aux_cfg.get(task, {})
             if not isinstance(slot_cfg, dict):
                 slot_cfg = {}
-            slot_cfg["provider"] = provider or "auto"
-            slot_cfg["model"] = model or ""
+            slot_cfg["provider"] = provider
+            slot_cfg["model"] = model
             if provider and (provider.startswith("custom:") or provider == "custom"):
                 # Resolve the auxiliary slot's base_url against the SELECTED
                 # provider, not the active main provider. A bare
@@ -9217,6 +9245,21 @@ def create_stream_channel() -> StreamChannel:
 
 STREAMS: dict = {}
 STREAMS_LOCK = threading.Lock()
+
+
+def peek_stream(stream_id):
+    """Lock-disciplined stream queue lookup.
+
+    Writers mutate STREAMS under STREAMS_LOCK (teardown in api/streaming.py,
+    the route layer's start/cancel paths); reads must take the same lock so a
+    read racing a teardown pop can never observe-and-use a queue the registry
+    has already released. Returns the queue or None — callers keep their
+    existing None-guard fallbacks.
+    """
+    with STREAMS_LOCK:
+        return STREAMS.get(stream_id)
+
+
 # stream_id -> session_id owner, populated synchronously before worker startup so
 # stream-id authorization does not depend on worker lifecycle registration.
 STREAM_SESSION_OWNERS: dict = {}
