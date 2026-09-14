@@ -12315,11 +12315,22 @@ function _buildAuxProviderOptions(sel,providers,currentProvider){
  autoOpt.value='auto';autoOpt.textContent='auto ('+t('settings_aux_provider_auto')+')';
  if(currentProvider==='auto'||!currentProvider) autoOpt.selected=true;
  sel.appendChild(autoOpt);
+ let matched=currentProvider==='auto'||!currentProvider;
  for(const p of providers){
   const opt=document.createElement('option');
   opt.value=p.slug;opt.textContent=p.name;
-  if(p.slug===currentProvider) opt.selected=true;
+  if(p.slug===currentProvider){opt.selected=true;matched=true;}
   sel.appendChild(opt);
+ }
+ // The configured provider can be absent from the /api/models catalog (e.g. its
+ // group exposes no models). Keep it selectable: with no matching option the
+ // select falls back to its first entry ('auto') and the next Apply would
+ // persist that, silently discarding the configured value.
+ if(!matched&&currentProvider){
+  const configuredOpt=document.createElement('option');
+  configuredOpt.value=currentProvider;configuredOpt.textContent=currentProvider+' (configured)';
+  configuredOpt.selected=true;
+  sel.appendChild(configuredOpt);
  }
 }
 
@@ -12335,6 +12346,16 @@ function _buildAuxModelOptions(sel,provider,providers,currentModel){
  }
  // Find matching provider in cached list
  const pData=providers.find(p=>p.slug===provider);
+ // A provider kept in the list only because its models endpoint failed would
+ // otherwise render as a silent, empty model select. Echo the same hint the
+ // main picker shows instead of implying "no models to choose from". (#7521)
+ if(pData&&pData.modelsEndpointError){
+  const errOpt=document.createElement('option');
+  errOpt.value='';errOpt.disabled=true;
+  errOpt.dataset.modelsEndpointError='1';
+  errOpt.textContent='\u26a0 '+(pData.modelsEndpointError.message||'Models endpoint could not be reached for this provider.');
+  sel.appendChild(errOpt);
+ }
  const modelValues=new Set();
  if(pData&&pData.models){
   for(const modelEntry of pData.models){
@@ -12578,6 +12599,22 @@ function _bindMainAdvancedOptionsButton(){
  btn.addEventListener('click',()=>{if(_mainAdvancedConfig!==null)_openAuxAdvancedOptions('__main__',_mainAdvancedConfig||{});});
 }
 
+// Build the auxiliary picker provider list from /api/models groups.
+// A named custom provider whose /v1/models probe failed still reaches the UI as
+// a group with an empty ``models`` list plus ``models_endpoint_error``
+// (api/config.py). Zero-model groups used to be filtered out here, which made
+// the provider vanish from every auxiliary select even though the main model
+// picker renders that same group together with its unreachable-endpoint hint. (#7521)
+function _auxProvidersFromModelGroups(groups){
+ const list=Array.isArray(groups)?groups:[];
+ return list.filter(g=>g&&g.provider&&((g.models&&g.models.length>0)||(g.extra_models&&g.extra_models.length>0)||g.models_endpoint_error)).map(g=>({
+  slug:g.provider_id||g.provider,
+  name:g.provider,
+  modelsEndpointError:g.models_endpoint_error||null,
+  models:[...(g.models||[]),...(g.extra_models||[])].map(m=>({id:m.id,label:m.label||m.id})),
+ }));
+}
+
 async function _loadAuxiliaryModels(){
  const container=$('auxModelsContainer');
  if(!container) return;
@@ -12592,11 +12629,7 @@ async function _loadAuxiliaryModels(){
   // Build provider list from /api/models groups
   // /api/models returns: { groups: [{ provider: str, provider_id: str, models: [{id,label}] }] }
   const groups=(modelsData&&modelsData.groups)||[];
-  _auxProviders=groups.filter(g=>g.provider&&((g.models&&g.models.length>0)||(g.extra_models&&g.extra_models.length>0))).map(g=>({
-   slug:g.provider_id||g.provider,
-   name:g.provider,
-   models:[...(g.models||[]),...(g.extra_models||[])].map(m=>({id:m.id,label:m.label||m.id})),
-  }));
+  _auxProviders=_auxProvidersFromModelGroups(groups);
   if(auxData&&Object.prototype.hasOwnProperty.call(auxData,'main')){
    _mainAdvancedConfig=auxData.main||{};
   }else{

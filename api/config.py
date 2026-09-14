@@ -1151,6 +1151,7 @@ _FALLBACK_MODELS = [
     {"provider": "MiniMax",   "id": "minimax/MiniMax-M2.7-highspeed",   "label": "MiniMax M2.7 Highspeed"},
     # Z.AI / GLM
     {"provider": "Z.AI",      "id": "zai/glm-5.3",                      "label": "GLM-5.3"},
+    {"provider": "Z.AI",      "id": "zai/glm-5.3-flash",                "label": "GLM-5.3 Flash"},
     {"provider": "Z.AI",      "id": "zai/glm-5.2",                      "label": "GLM-5.2"},
     {"provider": "Z.AI",      "id": "zai/glm-5.1",                      "label": "GLM-5.1"},
     {"provider": "Z.AI",      "id": "zai/glm-5",                        "label": "GLM-5"},
@@ -1398,6 +1399,37 @@ def _configured_model_ids(raw_models: object) -> list[str]:
     return model_ids
 
 
+def _provider_discover_allowed(provider_cfg: object) -> bool:
+    """Mirror the Hermes Agent ``discover_models`` opt-out (``model_switch_providers._discover_flag``).
+
+    ``discover_models`` defaults to True; the string forms ``"false"``/``"no"``/``"0"``
+    (case-insensitive) mean False. A provider that pins its catalog with
+    ``discover_models: false`` keeps its configured ``models:`` even when the entry is
+    also marked ``models_discovered: true`` — the explicit opt-out wins.
+    """
+    if not isinstance(provider_cfg, dict):
+        return True
+    discover = provider_cfg.get("discover_models", True)
+    if isinstance(discover, str):
+        return discover.strip().lower() not in {"false", "no", "0"}
+    return bool(discover)
+
+
+def _provider_models_are_discovered_catalog(provider_cfg: object) -> bool:
+    """True when ``models:`` is an auto-discovered catalog that should defer to the live probe.
+
+    A provider entry marked ``models_discovered: true`` carries a per-model *metadata*
+    mapping written by Hermes discovery, not a hand-curated allowlist — so the live
+    ``/v1/models`` catalog is authoritative. But an explicit ``discover_models: false``
+    re-pins the configured mapping as the source of truth, so honor that opt-out.
+    """
+    return (
+        isinstance(provider_cfg, dict)
+        and provider_cfg.get("models_discovered") is True
+        and _provider_discover_allowed(provider_cfg)
+    )
+
+
 def _configured_model_options(raw_models: object) -> list[dict[str, str]]:
     """Return picker option rows from supported config allowlist shapes."""
     labels: dict[str, str] = {}
@@ -1415,6 +1447,29 @@ def _configured_model_options(raw_models: object) -> list[dict[str, str]]:
         {"id": model_id, "label": labels.get(model_id, model_id)}
         for model_id in _configured_model_ids(raw_models)
     ]
+
+
+def _merge_model_option_rows(*row_lists: object) -> list[dict[str, str]]:
+    """Merge picker option rows from multiple sources, first-seen order, deduped by id.
+
+    Used to preserve a discovered provider's configured model IDs (ordered first) as a
+    fallback when a live ``/v1/models`` probe transiently returns nothing, merged with
+    any static built-in catalog without producing duplicate ids.
+    """
+    merged: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for rows in row_lists:
+        if not isinstance(rows, (list, tuple)):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            model_id = str(row.get("id") or "").strip()
+            if not model_id or model_id in seen:
+                continue
+            seen.add(model_id)
+            merged.append(row)
+    return merged
 
 
 def _named_custom_provider_slugs(config_obj: dict | None = None) -> set[str]:
@@ -1737,6 +1792,7 @@ _PROVIDER_MODELS = {
     ],
     "zai": [
         {"id": "glm-5.3", "label": "GLM-5.3"},
+        {"id": "glm-5.3-flash", "label": "GLM-5.3 Flash"},
         {"id": "glm-5.2", "label": "GLM-5.2"},
         {"id": "glm-5.1", "label": "GLM-5.1"},
         {"id": "glm-5", "label": "GLM-5"},
@@ -5747,8 +5803,12 @@ def _static_models_catalog_without_live_probes() -> dict:
             raw_key = canonical_to_raw_provider_key.get(pid, pid)
             provider_cfg = _get_provider_cfg(raw_key)
             raw_models = []
-            if isinstance(provider_cfg, dict) and "models" in provider_cfg:
-                raw_models = _configured_model_options(provider_cfg["models"])
+            if (
+                isinstance(provider_cfg, dict)
+                and "models" in provider_cfg
+                and not _provider_models_are_discovered_catalog(provider_cfg)
+            ):
+                raw_models = _configured_model_options(provider_cfg.get("models"))
             if not raw_models:
                 raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
             # Plugin-only providers (e.g. 9router) are not in _PROVIDER_MODELS
@@ -6130,6 +6190,97 @@ def _models_cache_file_fingerprint(path: Path) -> dict:
     return fingerprint
 
 
+# Codex's ~/.codex/models_cache.json is rewritten on Codex's own refresh timer.
+# Each rewrite bumps mtime_ns + size, but the payload usually only refreshes
+# the volatile timestamp fields (`fetched_at`, plus `updated_at` when present)
+# while the model catalog (client_version, etag, models[]) stays identical.
+# Fingerprinting that file by stat (#2443's _models_cache_file_fingerprint)
+# therefore invalidated the 24h /api/models cache on every Codex refresh, and
+# the next session visit paid a full live rebuild whose serial provider probes
+# starved the session-open path (#7540).
+#
+# This is a DENY-list, not an allow-list, on purpose — same safety direction as
+# _AUTH_FINGERPRINT_VOLATILE_KEYS: every other field (client_version, etag,
+# models, and any future model-affecting key) stays IN the fingerprint, so a
+# genuine catalog change still invalidates the cache.
+_CODEX_CACHE_FINGERPRINT_VOLATILE_KEYS = frozenset({
+    # Whole-file refresh timestamp, rewritten by every Codex models refresh.
+    "fetched_at",
+    # Same-family save timestamp (mirrors the auth.json deny-list).
+    "updated_at",
+})
+
+
+def _strip_volatile_codex_cache_fields(obj):
+    """Recursively drop refresh-timestamp-only keys from a Codex cache tree.
+
+    Pure structural transform; never mutates the input. Any key NOT in the
+    deny-list is preserved verbatim so real catalog changes still show through
+    in the fingerprint.
+    """
+    if isinstance(obj, dict):
+        return {
+            k: _strip_volatile_codex_cache_fields(v)
+            for k, v in obj.items()
+            if k not in _CODEX_CACHE_FINGERPRINT_VOLATILE_KEYS
+        }
+    if isinstance(obj, list):
+        return [_strip_volatile_codex_cache_fields(v) for v in obj]
+    return obj
+
+
+def _codex_models_cache_fingerprint(path: Path) -> dict:
+    """Return a content fingerprint of Codex's models_cache.json.
+
+    Unlike _models_cache_file_fingerprint() (mtime_ns + size), this hashes the
+    JSON content with the refresh-timestamp fields stripped, so a Codex
+    refresh that only bumps `fetched_at` does NOT invalidate the 24h
+    /api/models cache and therefore does not force the live rebuild that
+    stalled session opens (#7540). A change to anything that actually feeds the
+    Codex models we surface (client_version, etag, models[], an unknown future
+    field) still changes the hash and correctly busts the cache.
+
+    Failure modes are deliberately conservative — a missing file is recorded,
+    and an unreadable/undecodable file falls back to the stat-based fingerprint
+    so behaviour is never *less* safe than the stat-only version.
+    """
+    p = Path(path).expanduser()
+    fp: dict = {"path": str(p)}
+    try:
+        st = p.stat()
+    except OSError:
+        fp["missing"] = True
+        return fp
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        # Unreadable / corrupt / mid-write: keep the stat-based fingerprint.
+        # Strictly no less safe than the pre-fix behaviour (every write still
+        # invalidates) for this rare path only.
+        fp["mtime_ns"] = st.st_mtime_ns
+        fp["size"] = st.st_size
+        fp["semantic"] = "unparsed-fallback"
+        return fp
+    try:
+        # The recursive strip can raise (e.g. RecursionError on a pathologically
+        # deep JSON tree) — keep it inside the fallback try so any transform
+        # failure degrades to the stat fingerprint rather than 500ing /api/models.
+        stripped = _strip_volatile_codex_cache_fields(raw)
+        encoded = json.dumps(
+            stripped,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            default=str,
+        ).encode("utf-8")
+        fp["semantic_sha256"] = hashlib.sha256(encoded).hexdigest()
+    except Exception:
+        fp["mtime_ns"] = st.st_mtime_ns
+        fp["size"] = st.st_size
+        fp["semantic"] = "encode-fallback"
+    return fp
+
+
 def _models_cache_catalog_fingerprint() -> dict:
     """Return non-secret model-catalog identity metadata for cache invalidation.
 
@@ -6139,6 +6290,13 @@ def _models_cache_catalog_fingerprint() -> dict:
     deterministic so a server restart after catalog changes does not keep
     serving an otherwise-valid persisted models_cache.json until the 24h TTL
     expires (#2443).
+
+    The Codex axis uses a *content* fingerprint that excludes the refresh
+    timestamp fields (see _codex_models_cache_fingerprint): Codex rewrites
+    ~/.codex/models_cache.json on its own timer, bumping mtime_ns + size while
+    the model payload stays identical, so a stat-based fingerprint invalidated
+    the 24h cache on every Codex refresh and the next session visit paid a live
+    rebuild (#7540).
     """
     catalog_payload = {
         "provider_models": _PROVIDER_MODELS,
@@ -6159,7 +6317,7 @@ def _models_cache_catalog_fingerprint() -> dict:
     codex_home = Path(os.getenv("CODEX_HOME", "").strip() or (HOME / ".codex")).expanduser()
     return {
         "provider_catalog_sha256": provider_catalog_sha,
-        "codex_models_cache": _models_cache_file_fingerprint(codex_home / "models_cache.json"),
+        "codex_models_cache": _codex_models_cache_fingerprint(codex_home / "models_cache.json"),
     }
 
 
@@ -8149,13 +8307,16 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     # whichever model had local settings. Only Copilot skips the
                     # config-models allowlist branch and asks Hermes CLI for the
                     # live catalog first (static _PROVIDER_MODELS is fallback only).
-                    _uses_models_as_settings_map = pid == "copilot"
+                    _uses_models_as_settings_map = (
+                        pid == "copilot"
+                        or _provider_models_are_discovered_catalog(provider_cfg)
+                    )
                     if (
                         not _uses_models_as_settings_map
                         and isinstance(provider_cfg, dict)
                         and "models" in provider_cfg
                     ):
-                        raw_models = _configured_model_options(provider_cfg["models"])
+                        raw_models = _configured_model_options(provider_cfg.get("models"))
 
                     if not raw_models:
                         if pid == "moa":
@@ -8171,6 +8332,19 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                                 pid,
                                 _read_live_provider_model_ids(pid),
                             )
+                            if (
+                                not raw_models
+                                and _provider_models_are_discovered_catalog(provider_cfg)
+                            ):
+                                # A transient live-catalog failure must not drop a
+                                # provider's persisted discovered models (the empty
+                                # result would then be cached for up to 24h). Fall
+                                # back to the configured discovered IDs, ordered
+                                # first, merged with any static fallback (deduped).
+                                raw_models = _merge_model_option_rows(
+                                    _configured_model_options(provider_cfg.get("models")),
+                                    copy.deepcopy(_PROVIDER_MODELS.get(pid, [])),
+                                )
 
                     if not raw_models:
                         raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
