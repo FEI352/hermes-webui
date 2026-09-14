@@ -1750,6 +1750,7 @@ class Session:
             'profile': self.profile,
             'input_tokens': self.input_tokens,
             'output_tokens': self.output_tokens,
+            'tps': getattr(self, 'tps', None),
             'estimated_cost': self.estimated_cost,
             'cache_read_tokens': self.cache_read_tokens,
             'cache_write_tokens': self.cache_write_tokens,

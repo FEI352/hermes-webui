@@ -7190,8 +7190,16 @@ function _syncStatsLine(usage){
   if(toolMs>0) durParts.push((typeof t==='function')?t('stats_toolCall',_fmtDurationCompact(toolMs/1000)):'Tool '+_fmtDurationCompact(toolMs/1000));
   if(durParts.length>0) parts.durations=durParts.join(' · ');
   // speeds: tps
+  let latestMsgTps=0;
+  for(let i=msgs.length-1; i>=0; i--){
+    const m=msgs[i];
+    if(m&&m.role==='assistant'&&typeof m._turnTps==='number'&&m._turnTps>0){
+      latestMsgTps=m._turnTps;
+      break;
+    }
+  }
   const usageTps=Number(usage.tps)||0;
-  const tps=usageTps>0?usageTps:(tpsCount>0?tpsSum/tpsCount:0);
+  const tps=usageTps>0?usageTps:(latestMsgTps>0?latestMsgTps:(tpsCount>0?tpsSum/tpsCount:0));
   if(tps>0) parts.speeds=(typeof t==='function')?t('stats_speed',Math.round(tps)):Math.round(tps)+' tok/s';
   // cache hit
   const cacheHit=usage.cache_hit_percent;

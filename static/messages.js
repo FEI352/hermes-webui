@@ -6286,6 +6286,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               }
               if(typeof d.usage.tps==='number'&&d.usage.tps>0){
                 lastAsst._turnTps=d.usage.tps;
+                if(S.lastUsage) S.lastUsage.tps=d.usage.tps;
+                if(typeof _syncStatsLine==='function') _syncStatsLine(S.lastUsage);
               }
               if(d.usage.gateway_routing){
                 lastAsst._gatewayRouting=d.usage.gateway_routing;
@@ -6568,6 +6570,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           return;
         }
         if(typeof _setLiveAssistantTps==='function') _setLiveAssistantTps(d.tps);
+        if(S.lastUsage){
+          S.lastUsage.tps=d.tps;
+          if(typeof _syncStatsLine==='function') _syncStatsLine(S.lastUsage);
+        }
       }catch(_){}
     });
 

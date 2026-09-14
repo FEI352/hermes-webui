@@ -9532,23 +9532,15 @@ def _run_agent_streaming(
                 # above has already snapshotted and patched under this lock.
         # Lock released — agent runs without holding it
         # ── MCP Server Discovery (lazy import, idempotent) ──
-        # MUST run AFTER the HERMES_HOME mutation above — `discover_mcp_tools()`
-        # reads `~/.hermes/config.yaml` via `get_hermes_home()`, which uses
-        # `os.environ['HERMES_HOME']`.  Calling it before the mutation always
-        # loaded the default profile's `mcp_servers`, even when the session
-        # was stamped with a non-default profile.  See issue #1968.
-        #
-        # NOTE: `_servers` in `tools/mcp_tool.py` is a process-global registry
-        # keyed by server name.  This means once profile A registers a server
-        # named e.g. `postgres`, profile B's discovery sees it as already
-        # connected and skips it — even if B's config points at a different
-        # binary.  Fully fixing multi-profile concurrent use requires keying
-        # `_servers` by `(profile_home, name)` upstream in hermes-agent; that
-        # lives outside this WebUI repo.  This change fixes the headline bug
-        # for users who run a single non-default profile per WebUI process.
+        # NOTE: MCP tools are already discovered during startup and managed lazily.
+        # Calling discover_mcp_tools() synchronously on every turn blocks for 60-120s
+        # because failed MCP servers retry and time out synchronously in the turn thread.
+        # Only run if _servers has never been initialized.
         try:
-            from tools.mcp_tool import discover_mcp_tools
-            discover_mcp_tools()
+            from tools.mcp_tool import _core
+            if not _core._servers:
+                from tools.mcp_tool import discover_mcp_tools
+                discover_mcp_tools()
         except Exception:
             pass  # MCP not available or not configured — non-fatal
 
@@ -9658,6 +9650,7 @@ def _run_agent_streaming(
             _reasoning_buffer = ['']
             _metering_output_deltas = [0]
             _metering_reasoning_deltas = [0]
+            _stream_token_timestamps = [None, None]
 
             def _flush_reasoning_buffer():
                 # #4729: emit any coalesced-but-not-yet-flushed reasoning text immediately.
@@ -9769,10 +9762,14 @@ def _run_agent_streaming(
                 if stream_id in STREAM_PARTIAL_TEXT:
                     STREAM_PARTIAL_TEXT[stream_id] += str(text)
                 put('token', {'text': text})
+                _token_now = time.monotonic()
+                if _stream_token_timestamps[0] is None:
+                    _stream_token_timestamps[0] = _token_now
+                _stream_token_timestamps[1] = _token_now
                 # Update live throughput from stream delta callbacks, not from
                 # byte/character length. If a backend cannot provide live deltas,
                 # the frontend hides TPS rather than showing an estimate.
-                _metering_output_deltas[0] += 1
+                _metering_output_deltas[0] += max(1, _rough_text_token_count(text))
                 meter().record_token(stream_id, _metering_output_deltas[0])
                 _emit_metering()
 
@@ -9814,8 +9811,12 @@ def _run_agent_streaming(
                     _reasoning_last_put[0] = now
                     put('reasoning', {'text': _reasoning_buffer[0]})
                     _reasoning_buffer[0] = ''
+                _reason_now = time.monotonic()
+                if _stream_token_timestamps[0] is None:
+                    _stream_token_timestamps[0] = _reason_now
+                _stream_token_timestamps[1] = _reason_now
                 # Track reasoning deltas in the meter so live TPS reflects all AI output.
-                _metering_reasoning_deltas[0] += 1
+                _metering_reasoning_deltas[0] += max(1, _rough_text_token_count(reasoning_delta))
                 meter().record_reasoning(stream_id, _metering_reasoning_deltas[0])
                 _emit_metering()
 
@@ -10731,6 +10732,9 @@ def _run_agent_streaming(
             # or has been zeroed out (e.g. via a buggy migration / manual file edit).
             # Truthy-check covers None, missing-attr, and 0 uniformly.
             _turn_started_at = _pending_started_at if _pending_started_at else time.time()
+            _pre_turn_output_tokens = getattr(agent, 'session_completion_tokens', 0) or getattr(s, 'output_tokens', 0) or 0
+            _pre_turn_api_lat_len = len(getattr(agent, '_api_latency_history', []) or [])
+            _pre_turn_api_out_len = len(getattr(agent, '_api_output_history', []) or [])
             _external_state_snapshot = get_state_db_session_messages(
                 session_id,
                 profile=getattr(s, 'profile', None),
@@ -11724,9 +11728,22 @@ def _run_agent_streaming(
                 cache_read_tokens = getattr(agent, 'session_cache_read_tokens', 0) or 0
                 cache_write_tokens = getattr(agent, 'session_cache_write_tokens', 0) or 0
                 prev_input_tokens = getattr(s, 'input_tokens', 0) or 0
+                prev_output_tokens = getattr(s, 'output_tokens', 0) or 0
                 prev_cache_read_tokens = getattr(s, 'cache_read_tokens', 0) or 0
                 turn_input_tokens = max(0, input_tokens - prev_input_tokens)
+                turn_output_tokens = max(0, output_tokens - prev_output_tokens)
                 turn_cache_read_tokens = max(0, cache_read_tokens - prev_cache_read_tokens)
+                if turn_output_tokens == 0 and output_tokens > 0 and prev_output_tokens == 0:
+                    turn_output_tokens = output_tokens
+                if turn_output_tokens == 0:
+                    try:
+                        _ohist = list(getattr(agent, '_api_output_history', []) or [])
+                        if len(_ohist) > _pre_turn_api_out_len:
+                            turn_output_tokens = sum(int(o or 0) for o in _ohist[_pre_turn_api_out_len:])
+                    except Exception:
+                        pass
+                if turn_output_tokens == 0 and _metering_output_deltas[0] > 0:
+                    turn_output_tokens = _metering_output_deltas[0]
                 # Per-turn percent is computed server-side from persisted session
                 # counters so the message label uses the same denominator as the
                 # final usage payload even if the browser missed an intermediate event.
@@ -11811,9 +11828,23 @@ def _run_agent_streaming(
                     _turn_duration_seconds = max(0.0, time.time() - float(_turn_started_at))
                 except Exception:
                     _turn_duration_seconds = 0.0
+                turn_llm_duration = 0.0
+                try:
+                    _lhist = list(getattr(agent, '_api_latency_history', []) or [])
+                    if len(_lhist) > _pre_turn_api_lat_len:
+                        turn_llm_duration = sum(float(d) for d in _lhist[_pre_turn_api_lat_len:] if d and d > 0)
+                except Exception:
+                    turn_llm_duration = 0.0
+                if turn_llm_duration <= 0.0 and _stream_token_timestamps[0] and _stream_token_timestamps[1]:
+                    turn_llm_duration = max(0.0, float(_stream_token_timestamps[1] - _stream_token_timestamps[0]))
+                effective_llm_duration = turn_llm_duration if turn_llm_duration > 0.0 else _turn_duration_seconds
                 _turn_tps = None
-                if output_tokens and _turn_duration_seconds > 0:
+                if turn_output_tokens and effective_llm_duration > 0:
+                    _turn_tps = round(float(turn_output_tokens) / effective_llm_duration, 1)
+                elif output_tokens and _turn_duration_seconds > 0 and turn_output_tokens == 0:
                     _turn_tps = round(float(output_tokens) / _turn_duration_seconds, 1)
+                if _turn_tps is not None:
+                    s.tps = _turn_tps
                 _gateway_routing = _extract_gateway_routing_metadata(
                     agent,
                     result,
@@ -12216,6 +12247,7 @@ def _run_agent_streaming(
             usage = {
                 'input_tokens': input_tokens,
                 'output_tokens': output_tokens,
+                'turn_output_tokens': turn_output_tokens,
                 'estimated_cost': estimated_cost,
                 'cache_read_tokens': cache_read_tokens,
                 'cache_write_tokens': cache_write_tokens,
@@ -12223,6 +12255,8 @@ def _run_agent_streaming(
                 'turn_cache_hit_percent': turn_cache_hit_percent,
                 'duration_seconds': round(_turn_duration_seconds, 3),
             }
+            if effective_llm_duration > 0:
+                usage['llm_duration_seconds'] = round(effective_llm_duration, 3)
             if _turn_tps is not None:
                 usage['tps'] = _turn_tps
             if _gateway_routing:
