@@ -1002,6 +1002,19 @@ function _captureMessageViewportAnchor(){
   const container=$('messages');
   if(!container) return null;
   const containerRect=container.getBoundingClientRect();
+  const liveTurn=$('liveAssistantTurn');
+  if(liveTurn){
+    const liveRect=liveTurn.getBoundingClientRect();
+    if(liveRect.bottom>containerRect.top+1 && liveRect.top<=containerRect.top+40){
+      return {
+        isLiveTurn:true,
+        topOffset:liveRect.top-containerRect.top,
+        top:container.scrollTop,
+        scrollHeightAtCapture:container.scrollHeight,
+        inputGeneration:typeof _messageScrollInputGeneration==='number' ? _messageScrollInputGeneration : 0,
+      };
+    }
+  }
   const rows=Array.from(container.querySelectorAll('[data-msg-idx]'));
   for(const row of rows){
     const rawIdx=Number(row&&row.dataset&&row.dataset.msgIdx);
@@ -1135,6 +1148,20 @@ function _suppressBrowserOverflowAnchor(container){
 function _restoreMessageViewportAnchor(anchor, rawIdxDelta){
   const container=$('messages');
   if(!container||!anchor) return false;
+  if(anchor.isLiveTurn){
+    const liveTurn=$('liveAssistantTurn');
+    if(!liveTurn) return false;
+    const liveRect=liveTurn.getBoundingClientRect();
+    const containerRect=container.getBoundingClientRect();
+    const targetTop=Number.isFinite(anchor.topOffset)?anchor.topOffset:0;
+    const delta=(liveRect.top-containerRect.top)-targetTop;
+    if(Math.abs(delta)>1){
+      container.scrollTop+=delta;
+    }else if(Number.isFinite(anchor.top)){
+      container.scrollTop=anchor.top;
+    }
+    return true;
+  }
   const anchorKey=String(anchor.key||'');
   const sessionIdx=Number(anchor.sessionIdx);
   const hasSessionIdx=Number.isFinite(sessionIdx);
@@ -13669,15 +13696,16 @@ function _prepareLiveAnchorScrollRebuildGuard(scrollSnapshot){
   // raw scrollTop>0 here would mis-classify a pinned reader as unpinned and kill
   // auto-follow. Require an explicit unpin/non-pinned signal instead.
   const readerAwayFromBottom=beforeBottomDistance>250&&(_messageUserUnpinned||_scrollPinned===false);
-  if(!readerAwayFromBottom) return {readerAwayFromBottom:false,release:null};
-  scrollSnapshot.pinned=false;
-  scrollSnapshot.userUnpinned=true;
-  scrollSnapshot.bottom=beforeBottomDistance;
-  _messageUserUnpinned=true;
-  _scrollPinned=false;
-  _nearBottomCount=0;
+  if(readerAwayFromBottom){
+    scrollSnapshot.pinned=false;
+    scrollSnapshot.userUnpinned=true;
+    scrollSnapshot.bottom=beforeBottomDistance;
+    _messageUserUnpinned=true;
+    _scrollPinned=false;
+    _nearBottomCount=0;
+  }
   const msgInner=$('msgInner');
-  if(!msgInner||!msgInner.style) return {readerAwayFromBottom:true,release:null};
+  if(!msgInner||!msgInner.style) return {readerAwayFromBottom,release:null};
   const guardPreviousKey='liveAnchorScrollGuardPreviousMinHeight';
   let previousMinHeight=msgInner.style.minHeight||'';
   if(msgInner.dataset&&Object.prototype.hasOwnProperty.call(msgInner.dataset,guardPreviousKey)){
@@ -13688,7 +13716,7 @@ function _prepareLiveAnchorScrollRebuildGuard(scrollSnapshot){
   const guardHeight=Math.max(messagesEl.scrollHeight,Number(scrollSnapshot.scrollHeight)||0);
   if(guardHeight>0) msgInner.style.minHeight=`${guardHeight}px`;
   return {
-    readerAwayFromBottom:true,
+    readerAwayFromBottom,
     release:()=>{
       msgInner.style.minHeight=previousMinHeight;
       if(msgInner.dataset&&msgInner.dataset[guardPreviousKey]===previousMinHeight){
@@ -13700,18 +13728,11 @@ function _prepareLiveAnchorScrollRebuildGuard(scrollSnapshot){
 function _restoreLiveAnchorScrollSnapshotAfterRebuild(scrollSnapshot, scrollRebuildGuard){
   if(!scrollSnapshot) return;
   const hasHeightGuard=!!(scrollRebuildGuard&&scrollRebuildGuard.release);
-  // Pinned renders have no height guard to release, but still need the same
-  // queued ownership check: a reader can provide real input before the frame
-  // settles, and that input must win over the captured tail position.
-  if(!hasHeightGuard&&scrollSnapshot.pinned!==true) return;
   requestAnimationFrame(()=>{
-    if(hasHeightGuard) scrollRebuildGuard.release();
-    // Only re-restore the unpinned snapshot if the reader is STILL unpinned at
-    // rAF time. If they re-pinned between guard-engage and this frame, the
-    // stale re-restore would yank them back off the bottom (Opus gate finding).
-    if(scrollSnapshot.pinned===true||_messageUserUnpinned){
+    if(scrollSnapshot.pinned===true||_messageUserUnpinned||(scrollRebuildGuard&&scrollRebuildGuard.readerAwayFromBottom)){
       _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
     }
+    if(hasHeightGuard) scrollRebuildGuard.release();
   });
 }
 function _resetMismatchedLiveAssistantTurnForSession(turn, sessionId){
