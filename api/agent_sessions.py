@@ -86,7 +86,14 @@ def open_state_db_readonly(db_path: Path, log: logging.Logger | None = None) -> 
     """
     if not db_path.exists():
         raise FileNotFoundError(f"agent state.db not found: {db_path}")
-    return sqlite3.connect(state_db_readonly_uri(db_path.resolve()), uri=True)
+    conn = sqlite3.connect(state_db_readonly_uri(db_path.resolve()), uri=True)
+    try:
+        conn.execute("PRAGMA mmap_size = 268435456;")
+        conn.execute("PRAGMA cache_size = -64000;")
+        conn.execute("PRAGMA temp_store = MEMORY;")
+    except Exception:
+        pass
+    return conn
 
 
 MESSAGING_SOURCES = {
