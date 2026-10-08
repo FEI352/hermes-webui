@@ -21252,6 +21252,28 @@ def _handle_tts(handler, parsed):
             from api.helpers import bad as _bad
             return _bad(handler, "unauthorized", 401)
 
+    # A chunked playback captures the profile that owns it, so a mid-playback
+    # profile switch cannot stream the previous profile's text under the new
+    # profile's provider/credentials. Requests that omit the field stay accepted
+    # (legacy direct callers); only an explicit MISMATCH is rejected, and it is
+    # rejected here — before the limiter, credential lookup or config access —
+    # so a mismatched chunk costs no quota and reads no other profile's config.
+    try:
+        claimed_profile = data.get("profile")
+    except Exception:
+        claimed_profile = None
+    if isinstance(claimed_profile, str) and claimed_profile.strip():
+        from api.helpers import bad as _bad
+        from api.profiles import _profiles_match, get_active_profile_name
+
+        claimed = claimed_profile.strip()
+        if not _profiles_match(claimed, get_active_profile_name()):
+            return _bad(
+                handler,
+                "playback profile no longer active",
+                409,
+            )
+
     # High-quality per-client rate limiting for TTS.
     if not hasattr(_handle_tts, "_tts_limiter"):
         import time as _time, threading as _threading
@@ -21465,6 +21487,7 @@ def _handle_tts(handler, parsed):
         "fr-CA-AntoineNeural", "fr-CA-JeanNeural",
         "fr-CA-SylvieNeural", "fr-CA-ThierryNeural",
         "fr-FR-DeniseNeural", "fr-FR-EloiseNeural", "fr-FR-HenriNeural",
+        "fr-FR-RemyMultilingualNeural", "fr-FR-VivienneMultilingualNeural",
         "id-ID-GadisNeural",
     }
     if voice not in allowed:
@@ -24028,7 +24051,25 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
     # allows state.db rows newer than the watermark, so post-edit turns
     # are not dropped. Never 0.0 (the truncate-to-empty sentinel, #2914).
     if getattr(s, "truncation_watermark", None):
-        s.truncation_watermark = user_msg.get("timestamp") or time.time()
+        # Same invariant as streaming._advance_truncation_watermark_after_commit:
+        # only ever advance to a REAL message timestamp. Falling back to
+        # time.time() here stamped the watermark newer than every sidecar row
+        # and permanently self-locked the append-only state.db merge. When
+        # started_at is absent, clamp to the newest real message instead.
+        checkpoint_ts = user_msg.get("timestamp") or user_msg.get("_ts")
+        if not (isinstance(checkpoint_ts, (int, float)) and checkpoint_ts > 0):
+            newest_real_ts = None
+            for _m in (getattr(s, "messages", None) or []):
+                if not isinstance(_m, dict):
+                    continue
+                _ts = _m.get("timestamp") or _m.get("_ts")
+                if isinstance(_ts, (int, float)) and _ts > 0:
+                    newest_real_ts = (
+                        _ts if newest_real_ts is None else max(newest_real_ts, _ts)
+                    )
+            checkpoint_ts = newest_real_ts
+        if isinstance(checkpoint_ts, (int, float)) and checkpoint_ts > 0:
+            s.truncation_watermark = float(checkpoint_ts)
 
 
 def _is_default_or_empty_session_title(title) -> bool:
