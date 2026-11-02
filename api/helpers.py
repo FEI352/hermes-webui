@@ -747,7 +747,7 @@ def t(
     _safe_write(handler, body)
 
 
-MAX_BODY_BYTES = 20 * 1024 * 1024  # 20MB limit for non-upload POST bodies
+MAX_BODY_BYTES = 100 * 1024 * 1024  # 100MB limit for non-upload POST bodies
 
 
 # ── Credential redaction ──────────────────────────────────────────────────────
