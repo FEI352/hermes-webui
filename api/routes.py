@@ -73,6 +73,7 @@ from api.session_events import (
 )
 from api.gateway_restart import restart_active_profile_gateway
 from api.shares import (
+    ShareLinkOwnedElsewhere,
     build_share_snapshot,
     load_share,
     revoke_share,
@@ -108,8 +109,13 @@ def _publish_session_list_changed(
         publish_session_list_changed(reason)
 
 
-def _sync_session_title_to_insights(session) -> None:
-    """Write title-only session metadata updates through to state.db when enabled."""
+def _sync_session_title_to_insights(session, *, rename: bool = False) -> None:
+    """Write title-only session metadata updates through to state.db when enabled.
+
+    ``rename=True`` only from /api/session/rename: an explicit user rename,
+    including clearing it back to an automatic label. Other callers sync
+    passively (``api.state_sync.sync_session_usage``).
+    """
     try:
         if not load_settings().get("sync_to_insights"):
             return
@@ -127,6 +133,7 @@ def _sync_session_title_to_insights(session) -> None:
             profile=getattr(session, "profile", None),
             cache_read_tokens=getattr(session, "cache_read_tokens", None) or 0,
             cache_write_tokens=getattr(session, "cache_write_tokens", None) or 0,
+            rename=rename,
         )
     except Exception:
         logger.debug("Failed to update session title in state.db", exc_info=True)
@@ -20322,11 +20329,14 @@ def handle_post(handler, parsed) -> bool:
             # it is live before the snapshot writer may keep it.
             if durable_token and load_share(durable_token) is None:
                 durable_token = ""
-            share_meta = write_share_snapshot(
-                snapshot,
-                token=durable_token,
-                source_session_id=sid,
-            )
+            try:
+                share_meta = write_share_snapshot(
+                    snapshot,
+                    token=durable_token,
+                    source_session_id=sid,
+                )
+            except ShareLinkOwnedElsewhere as exc:
+                return bad(handler, str(exc), 409)  # #8734: nothing was written
             persisted_session.share_token = share_meta["share_token"]
             persisted_session.share_created_at = share_meta["share_created_at"]
             # Update the live cached copy BEFORE the durable save (#8255 review,
@@ -20434,7 +20444,10 @@ def handle_post(handler, parsed) -> bool:
                 # revoke_share() locates the published snapshot through the
                 # session's token field, so hand it the resolved authority.
                 target_session.share_token = token
-                revoke_share(target_session)
+                try:
+                    revoke_share(target_session)
+                except ShareLinkOwnedElsewhere as exc:
+                    return bad(handler, str(exc), 409)  # #8734: the link and both pairs are untouched
                 if load_share(token) is not None:
                     return bad(handler, "Share link could not be revoked", 500)
             # A writer may have saved while the revoke was reading the snapshot
@@ -21087,7 +21100,7 @@ def handle_post(handler, parsed) -> bool:
                 SESSIONS[sid] = s
                 SESSIONS.move_to_end(sid)
                 _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
-        _sync_session_title_to_insights(s)
+        _sync_session_title_to_insights(s, rename=True)
         publish_session_list_changed(
             "session_rename",
             profile=getattr(s, "profile", None),
@@ -21645,6 +21658,7 @@ def handle_post(handler, parsed) -> bool:
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
         draft_delete_failed = False
+        tombstone_persist_failed = False
         try:
             # #8837: revoke its link first; a revoke that fails refuses the delete.
             if not _revoke_owned_shares_before_delete(sid, p):
@@ -21803,7 +21817,8 @@ def handle_post(handler, parsed) -> bool:
                 try:
                     _record_webui_deleted_session_tombstone(sid)
                 except Exception:
-                    logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
+                    logger.error("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
+                    tombstone_persist_failed = True
         finally:
             session_lock.release()
         try:
@@ -21836,6 +21851,16 @@ def handle_post(handler, parsed) -> bool:
             "state_db_cleanup_failed": state_db_cleanup_failed,
             **worktree_retained,
         }
+        if tombstone_persist_failed:
+            response["tombstone_persist_failed"] = True
+            response.update(
+                {
+                    "ok": False,
+                    "error": "delete_tombstone_failed",
+                    "action": "session_delete",
+                }
+            )
+            return j(handler, response, status=500)
         if draft_delete_failed:
             response["draft_delete_failed"] = True
             response.update(
